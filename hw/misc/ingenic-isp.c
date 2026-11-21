@@ -1565,6 +1565,11 @@ struct IngenicIspLayout {
     hwaddr first_frame, first_done; /* read 1 from the VIC's first frame */
                                     /* and the channels' first done after */
                                     /* a reset */
+    uint32_t start_lines;           /* the core's frame start comes these */
+                                    /* sensor lines after the VIC's bit; */
+                                    /* 0: with it */
+    uint32_t end_stats;             /* statistics bits that come at the */
+                                    /* frame's end (late_done) */
     hwaddr ch_busy;                 /* reads 0 */
     bool busy_held;                 /* a channel that put its frame out */
                                     /* stays busy while enabled */
@@ -1795,6 +1800,18 @@ static const IngenicIspLayout ingenic_t31_isp_layout = {
      */
     .first_frame = 0x060,
     .first_done = 0x064,
+    /*
+     * A T31X (gc2053, 1080p at 30 fps), its interrupts timed from user
+     * space at 130 us over 120 frames: the VIC's interrupt comes 1.8 to
+     * 2.1 ms after a frame's end and the core's frame start 0.53 to 0.79
+     * ms after it; the end's statistics, channel dones and frame end come
+     * as 6 to 9 interrupts within about 165 us, raised here together.
+     * start_lines is that 0.65 ms as lines of this one sensor and mode;
+     * whether the part counts lines or time was not shown.
+     */
+    .start_lines = 28,
+    .end_stats = BIT(18) | BIT(20) | BIT(26) | BIT(27) | BIT(28) |
+                 BIT(29) | BIT(30) | BIT(31),
     .stats = &ingenic_t31_isp_stats,
     .busy_held = true,
     .ch_en_pulse = 0xf0000,
@@ -2669,6 +2686,11 @@ static void isp_raise(IngenicIspState *s, hwaddr off, uint32_t bits)
 {
     char name[ISP_NAME_LEN];
 
+    if (s->hold_stats && off == isp_layout(s)->pipe[0].int_sta) {
+        /* a frame's statistics are ready at its end (isp_late_end()) */
+        s->held_stats |= bits & isp_layout(s)->end_stats;
+        bits &= ~isp_layout(s)->end_stats;
+    }
     if (!bits) {
         return;
     }
@@ -2676,6 +2698,17 @@ static void isp_raise(IngenicIspState *s, hwaddr off, uint32_t bits)
     if (trace_event_get_state_backends(TRACE_INGENIC_ISP_RAISE)) {
         trace_ingenic_isp_raise(off, bits, isp_reg_name(s, off, name));
     }
+}
+
+/* The T31's frame start, due a few lines after the VIC's bit */
+static void isp_start_timer(void *opaque)
+{
+    IngenicIspState *s = opaque;
+    const IngenicIspLayout *l = isp_layout(s);
+
+    s->start_at = -1;
+    isp_raise(s, l->pipe[0].int_sta, l->int_frame_start);
+    isp_update(s);
 }
 
 static void isp_tick(IngenicIspState *s, const IngenicIspTick *t,
@@ -10383,6 +10416,9 @@ static void isp_late_end(IngenicIspState *s)
         R(pipe->busy) &= ~done;
     }
     s->msca_latched[0] = false;
+    /* the frame's statistics, held from its start (isp_raise()) */
+    isp_raise(s, pipe->int_sta, s->held_stats);
+    s->held_stats = 0;
     isp_frame_end_irq(s, 0);
     isp_update(s);
 }
@@ -10454,7 +10490,9 @@ static void isp_core_frame(IngenicIspState *s, ImageSensorState *sensor,
     if (!p) {
         isp_mdns_frame(s, sensor, frame);
     }
-    isp_raise(s, pipe->int_sta, l->int_frame_start);
+    if (!l->start_lines || p) {
+        isp_raise(s, pipe->int_sta, l->int_frame_start);
+    }
     isp_tick(s, &l->tick, l->tick.start);
     /*
      * The frame goes out on the channels enabled as it reached the MSCA; a
@@ -10518,7 +10556,9 @@ static void isp_core_frame(IngenicIspState *s, ImageSensorState *sensor,
         s->ch0_span = isp_period(s, sensor) * 15 / 16;
     }
     if (l->stats && (!p || l->stats->sec)) {
+        s->hold_stats = late && l->end_stats;
         isp_stats(s, sensor, frame, p);
+        s->hold_stats = false;
     }
     isp_latch(s, LATCH_END);
     isp_shadow_ram_run(s);
@@ -10532,6 +10572,25 @@ static void isp_core_frame(IngenicIspState *s, ImageSensorState *sensor,
     }
     if (!late) {
         isp_frame_end_irq(s, p);
+    }
+    if (l->start_lines && !p) {
+        /*
+         * The core's frame start comes a few lines after the VIC's bit,
+         * which the caller raises now, once the frame is made: timed from
+         * here, so the host's time making it does not close the gap
+         */
+        uint32_t rate = image_sensor_line_rate(sensor, l->raw_part);
+
+        if (s->start_at >= 0) {
+            /* the last frame's, still waiting */
+            isp_raise(s, pipe->int_sta, l->int_frame_start);
+        }
+        s->start_at = qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL) +
+                      (rate ? (int64_t)l->start_lines *
+                              NANOSECONDS_PER_SECOND / rate : 0);
+        if (!s->gated) {
+            timer_mod(s->start_timer, s->start_at);
+        }
     }
     s->pic_scope = false;
     for (unsigned i = 0; i < ARRAY_SIZE(s->pic); i++) {
@@ -10936,6 +10995,7 @@ static void isp_clock_now(void *opaque, int n, int level)
         s->late_due = s->late_pending ?
                       timer_expire_time_ns(s->late_timer) : -1;
         timer_del(s->late_timer);
+        timer_del(s->start_timer);
         return;
     }
     if (l->gate_holds) {
@@ -10946,6 +11006,10 @@ static void isp_clock_now(void *opaque, int n, int level)
         }
         if (s->late_pending && s->late_due >= 0) {
             timer_mod(s->late_timer, s->late_due + d);
+        }
+        if (s->start_at >= 0) {
+            s->start_at += d;
+            timer_mod(s->start_timer, s->start_at);
         }
 
         for (unsigned p = 0; p < INGENIC_ISP_PIPES; p++) {
@@ -12360,6 +12424,10 @@ static void ingenic_isp_reset_hold(Object *obj, ResetType type)
     timer_del(s->core_timer);
     timer_del(s->late_timer);
     s->late_pending = s->late_ch0 = s->defer_done = false;
+    timer_del(s->start_timer);
+    s->start_at = -1;
+    s->hold_stats = false;
+    s->held_stats = 0;
     s->core_kicked = false;
     s->core_busy = false;
     s->core_turn = 0;
@@ -12508,6 +12576,8 @@ static void ingenic_isp_init(Object *obj)
     }
     s->core_timer = timer_new_ns(QEMU_CLOCK_VIRTUAL, isp_core_timer, s);
     s->late_timer = timer_new_ns(QEMU_CLOCK_VIRTUAL, isp_late_timer, s);
+    s->start_timer = timer_new_ns(QEMU_CLOCK_VIRTUAL, isp_start_timer, s);
+    s->start_at = -1;
     s->bh = qemu_bh_new(isp_due_bh, s);
     qdev_init_gpio_out_named(DEVICE(obj), s->ivdc_frame, "ivdc-frame",
                              INGENIC_ISP_SENSORS);
@@ -12760,6 +12830,26 @@ static const VMStateDescription vmstate_ingenic_isp_late_sub = {
         VMSTATE_UINT32(late_done, IngenicIspState),
         VMSTATE_UINT32(late_rest, IngenicIspState),
         VMSTATE_INT64(late_due, IngenicIspState),
+        VMSTATE_END_OF_LIST()
+    }
+};
+
+static bool isp_start_needed(void *opaque)
+{
+    IngenicIspState *s = opaque;
+
+    return s->start_at >= 0 || s->held_stats;
+}
+
+static const VMStateDescription vmstate_ingenic_isp_start_sub = {
+    .name = TYPE_INGENIC_ISP "/start",
+    .version_id = 1,
+    .minimum_version_id = 1,
+    .needed = isp_start_needed,
+    .fields = (const VMStateField[]) {
+        VMSTATE_TIMER_PTR(start_timer, IngenicIspState),
+        VMSTATE_INT64(start_at, IngenicIspState),
+        VMSTATE_UINT32(held_stats, IngenicIspState),
         VMSTATE_END_OF_LIST()
     }
 };
@@ -13115,6 +13205,7 @@ static const VMStateDescription vmstate_ingenic_isp = {
         &vmstate_ingenic_isp_ch0_out_sub,
         &vmstate_ingenic_isp_push_latch_sub,
         &vmstate_ingenic_isp_late_sub,
+        &vmstate_ingenic_isp_start_sub,
         &vmstate_ingenic_isp_switch_sub,
         &vmstate_ingenic_isp_ivdc_sub,
         &vmstate_ingenic_isp_mdma_sub,

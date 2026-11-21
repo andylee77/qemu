@@ -219,6 +219,11 @@ struct IngenicIspState {
     bool defer_done;                    /* a frame's channels are working */
     uint32_t late_chans, late_done, late_rest;
     int64_t late_due;                   /* when it ends, held by the gate */
+    /* T31: the core's frame start, due a few lines after the VIC's bit */
+    QEMUTimer *start_timer;
+    int64_t start_at;                   /* when, or -1: none waits */
+    bool hold_stats;                    /* a frame's statistics are made */
+    uint32_t held_stats;                /* their bits, for its end */
     bool core_kicked;                   /* the driver lets it take the next */
     bool core_busy;                     /* took one whose end is unserved */
     uint32_t core_turn;                 /* the input whose turn it is */
