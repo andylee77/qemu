@@ -1562,6 +1562,9 @@ struct IngenicIspLayout {
     bool int_mask;                  /* int_en masks: 1 off */
     uint32_t int_frame_start, int_frame_end;
     uint32_t int_ch0;               /* raised with channel 0's frame */
+    hwaddr first_frame, first_done; /* read 1 from the VIC's first frame */
+                                    /* and the channels' first done after */
+                                    /* a reset */
     hwaddr ch_busy;                 /* reads 0 */
     bool busy_held;                 /* a channel that put its frame out */
                                     /* stays busy while enabled */
@@ -1781,6 +1784,17 @@ static const IngenicIspLayout ingenic_t31_isp_layout = {
     },
     .int_frame_start = BIT(12),
     .int_frame_end = BIT(13),
+    /*
+     * A T31X (gc2053, raptor) read from user space every 6 to 10 us over
+     * fourteen starts of the streamer: both 0 after the soft reset tx-isp
+     * pulses as it opens the ISP; 0x060 1 48 to 70 ms after the VIC
+     * starts, once before the core's line counter (0x108) had moved, so
+     * with the VIC's first frame; 0x064 1 after the channels' first done,
+     * within about 0.1 ms of the driver taking it (what sets it there is
+     * not shown: no ISP word the driver writes moves with it)
+     */
+    .first_frame = 0x060,
+    .first_done = 0x064,
     .stats = &ingenic_t31_isp_stats,
     .busy_held = true,
     .ch_en_pulse = 0xf0000,
@@ -10352,6 +10366,9 @@ static void isp_late_end(IngenicIspState *s)
         ch->done_uv[i] = ch->late_uv;
         ch->done_frame[i] = ch->late_frame;
         isp_raise(s, pipe->done_sta ?: pipe->int_sta, BIT(n));
+        if (l->first_done) {
+            R(l->first_done) = 1;
+        }
     }
     if (s->late_ch0) {
         s->late_ch0 = false;
@@ -10732,6 +10749,9 @@ static void isp_frame_run(IngenicIspVic *v)
     }
     if (l->vic_frames) {
         VIC(v->n, l->vic_frames)++;
+    }
+    if (l->first_frame && !v->n) {
+        R(l->first_frame) = 1;
     }
     if (l->mdma) {
         isp_mdma_frame(s, v, sensor);

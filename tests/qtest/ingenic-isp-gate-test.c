@@ -317,9 +317,42 @@ static void test_busy_drop(const void *data)
     qtest_quit(qts);
 }
 
+/*
+ * As a T31X reads 0x060 and 0x064 as the streamer starts: 0 after the soft
+ * reset (SRBC bit 22), 0x060 1 from the VIC's first frame, 0x064 1 from the
+ * channels' first done, both 0 again after the next soft reset
+ */
+#define CPM_SRBC        0x100000c4
+#define SRBC_ISP_SR     (1u << 22)
+
+static void test_first(const void *data)
+{
+    const IspPart *p = data;
+    QTestState *qts = start(p);
+
+    qtest_writel(qts, ISP + p->ch_en, 1);
+    push(qts, p, 0);
+    push(qts, p, 0);
+    g_assert_cmphex(qtest_readl(qts, ISP + 0x060), ==, 0);
+    g_assert_cmphex(qtest_readl(qts, ISP + 0x064), ==, 0);
+    qtest_writel(qts, ISP + p->vic, 1);
+    g_assert_cmphex(qtest_readl(qts, ISP + 0x060), ==, 1);
+    g_assert_cmphex(qtest_readl(qts, ISP + 0x064), ==, 0);
+    qtest_clock_step(qts, FRAME_NS / 16 * 15);
+    g_assert_true(took(qts, p, 0));
+    g_assert_cmphex(qtest_readl(qts, ISP + 0x060), ==, 1);
+    g_assert_cmphex(qtest_readl(qts, ISP + 0x064), ==, 1);
+    qtest_writel(qts, CPM_SRBC, SRBC_ISP_SR);
+    qtest_writel(qts, CPM_SRBC, 0);
+    g_assert_cmphex(qtest_readl(qts, ISP + 0x060), ==, 0);
+    g_assert_cmphex(qtest_readl(qts, ISP + 0x064), ==, 0);
+    qtest_quit(qts);
+}
+
 int main(int argc, char **argv)
 {
     g_test_init(&argc, &argv, NULL);
+    qtest_add_data_func("/ingenic-isp-gate/t31/first", &t31, test_first);
     qtest_add_data_func("/ingenic-isp-gate/t21/gate", &t21, test_gate);
     qtest_add_data_func("/ingenic-isp-gate/t23/gate", &t23, test_gate);
     qtest_add_data_func("/ingenic-isp-gate/t31/gate", &t31, test_gate);
