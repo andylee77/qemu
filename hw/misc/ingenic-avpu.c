@@ -149,6 +149,8 @@ struct IngenicAvpuLayout {
     hwaddr core, core_stride;
     hwaddr cl_addr, start, reset, clock, busy, status;
     uint32_t busy_idle, busy_running;
+    hwaddr busy_en;                 /* bit 0 there sets busy_en_bit */
+    uint32_t busy_en_bit;
     unsigned cores;
     unsigned irq_stride;            /* interrupt bits per core */
     hwaddr axi, mirror;             /* the AXI identity; where the zone */
@@ -1341,7 +1343,12 @@ static uint64_t ingenic_avpu_read(void *opaque, hwaddr addr, unsigned size)
             return s->clock[core] ? 0x00010001 : 0;
         }
         if (reg == l->busy) {
-            return s->job[core] ? l->busy_running : l->busy_idle;
+            uint32_t v = s->job[core] ? l->busy_running : l->busy_idle;
+
+            if (l->busy_en && (R(off - reg + l->busy_en) & 1)) {
+                v |= l->busy_en_bit;
+            }
+            return v;
         }
         /* a video job's first entry, as the core loads it */
         if (s->zone_mirror && core == 0 && s->job[0] &&
@@ -1687,10 +1694,26 @@ static const IngenicAvpuLayout ingenic_avpu_el200 = {
     .cl_addr = 0x0,
     .status = 0x8,
     .start = 0x18,
+    /*
+     * MEASURED on a T41NQ (os04d10, raptor's streams), a core's busy word
+     * read from user space every 3.3 us: 0 idle, 0x80000003 while a job
+     * codes, and 0x80000000 from the driver's 1 in +0x2c until the start
+     * and for a moment after the job (bit 1 alone seen briefly). The
+     * driver reads it once, between that 1 and the start.
+     */
     .busy = 0x1c,
-    .busy_idle = BIT(31),
+    .busy_running = BIT(31) | 3,
+    .busy_en = 0x2c,
+    .busy_en_bit = BIT(31),
     .cores = 2,
     .irq_stride = 2,
+    /*
+     * Not modelled, as a T41NQ reads them: +0x840's high half counts down
+     * while core 0 codes and holds idle, by an amount that follows the
+     * job's work, not its time (jobs of one size fell 38049 to 38367 over
+     * 13.2 to 14.0 ms; a 640x360 job 2507 to 2515), likely the AXI
+     * block's transfers; +0x808 holds small codes only while it codes
+     */
     .axi = 0x800,
     .axi_ver = 3,
     .mirror = 0x40,

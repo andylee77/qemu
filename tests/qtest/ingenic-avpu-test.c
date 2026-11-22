@@ -666,9 +666,62 @@ static void test_silicon_off(void)
     qtest_quit(qts);
 }
 
+/*
+ * The T41's busy word (core 0 +0x1c), as a T41NQ reads it streaming: 0 idle,
+ * 0x80000000 from the driver's 1 in +0x2c until the start, 0x80000003 while
+ * the job codes, 0 again once +0x2c is cleared after it. The host is held
+ * 300 ms on the job so that it is read in flight.
+ */
+static void test_busy_el200(void)
+{
+    QTestState *qts = qtest_initf("-machine %s "
+        "-global ingenic-avpu.x-host-delay-ms=300", el200.machine);
+    g_autofree uint32_t *w = g_new0(uint32_t, 0x1000 / 4);
+    uint8_t y[W * H], c[W * H / 2];
+    uint32_t busy = el200.base + 0x101c, en = el200.base + 0x102c;
+
+    memset(y, 90, sizeof(y));
+    memset(c, 128, sizeof(c));
+    qtest_memwrite(qts, SRC_Y, y, sizeof(y));
+    qtest_memwrite(qts, SRC_C, c, sizeof(c));
+    w[0] = CL_LAST | 1;                             /* H.265 */
+    w[1] = (W / 8 - 1) | (H / 8 - 1) << 16;
+    w[3] = CABAC;
+    w[24] = 2u << 28 | QP << 16;                    /* intra */
+    w[40] = SRC_Y;
+    w[42] = SRC_C;
+    w[52] = W;
+    w[136] = BS;
+    w[141] = ROOM;
+    for (int i = 0; i < 0x1000 / 4; i++) {
+        w[i] = cpu_to_le32(w[i]);
+    }
+    qtest_memwrite(qts, LIST, w, 0x1000);
+
+    g_assert_cmphex(qtest_readl(qts, busy), ==, 0);
+    qtest_writel(qts, en, 1);
+    g_assert_cmphex(qtest_readl(qts, busy), ==, 0x80000000);
+    qtest_writel(qts, el200.base + el200.status, STATUS);
+    qtest_writel(qts, el200.base + el200.cl_addr, LIST);
+    qtest_writel(qts, el200.base + el200.start, 2);
+    g_assert_cmphex(qtest_readl(qts, busy), ==, 0x80000003);
+    for (int i = 0; i < 20000 &&
+         !(qtest_readl(qts, el200.base + el200.irq) & 1); i++) {
+        g_usleep(500);
+    }
+    g_assert_cmphex(qtest_readl(qts, el200.base + el200.irq) & 1, ==, 1);
+    g_assert_cmphex(qtest_readl(qts, busy), ==, 0x80000000);
+    qtest_writel(qts, en, 0);
+    g_assert_cmphex(qtest_readl(qts, busy), ==, 0);
+    /* the JPEG core's word reads 0 idle too */
+    g_assert_cmphex(qtest_readl(qts, el200.base + 0x201c), ==, 0);
+    qtest_quit(qts);
+}
+
 int main(int argc, char **argv)
 {
     g_test_init(&argc, &argv, NULL);
+    qtest_add_func("ingenic/avpu/el200/busy", test_busy_el200);
 
     qtest_add_data_func("ingenic/avpu/el150/transform-skip", &el150,
                         test_transform_skip);
