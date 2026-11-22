@@ -690,8 +690,8 @@ static const PinScene pin_scenes[] = {
       1280, 720 },
     { "ingenic-t31", 453, 301, ",object=on,noise=on", 0, 0x00f300ff,
       85, 86, 87, 88, 4,
-      { "41edc4c4364a7652 dcb85daf05c13c02 76141816118e0bfc 7de7ed5cf3ac25e0",
-        "ed1a4aeaaa93d8da 7bec767d303f47e7 40851e68489405d2 7ee404a3eb7f80b8" },
+      { "41edc4c4364a7652 dcb85daf05c13c02 76141816118e0bfc ea5f923890b7282a",
+        "ed1a4aeaaa93d8da 7bec767d303f47e7 40851e68489405d2 afcf794ad38489a5" },
       322, 190 },
     /* a T23's */
     { "ingenic-t23", 453, 301, ",motion=off,noise=on", 0, 0x00c000ff,

@@ -3603,9 +3603,11 @@ static void isp_scale_band(void *arg, unsigned i, unsigned n)
  * horizontal one; an axis at 1:1 passes untouched. The T31's chroma
  * pairs, at half the size, over a step of 1024 are the sample at ip below
  * phase 1/2 and the mean of it and the next from there (exact at 4:1, 85%
- * at 8:3); below it they are the sample at ip, which is the least wrong
- * of what was tried: the board's chroma there is a smoothed single sample
- * that no four taps fitted.
+ * at 8:3). Below it they are an approximation fitted to a T31X: the
+ * sample at ip up to phase 1/2, then the two samples mixed by twice the
+ * phase less one, rounded. It is exact where every phase is 0 or 1/2 (3:2
+ * and 2:1); elsewhere the part has a term that changes from column to
+ * column, not found, so the model is close but not the part's rule.
  */
 static const int16_t msca_half[257][4] = {
     { 0, 512, 0, 0 }, { 0, 512, 0, 0 }, { 0, 512, 0, 0 },
@@ -4178,8 +4180,14 @@ static void isp_poly_cols(unsigned kind, uint32_t n_in, uint32_t n_out,
             c->w[2] = ph < 256 ? 0 : 2048;
         } else if (step > 1024) {
             c->w[0] = c->w[1] = c->w[2] = c->w[3] = 1024;
-        } else if (step == 512 || nc == 2) {
+        } else if (step == 512) {
             c->w[1] = 4096;
+        } else if (nc == 2) {
+            /* an approximation (msca_half): ip to 1/2, then the next */
+            int f = MIN(MAX(2 * (int)ph - 512, 0), 512) * 8;
+
+            c->w[1] = 4096 - f;
+            c->w[2] = f;
         } else {
             memcpy(c->w, t31_msca_tab[ph], 4 * sizeof(int16_t));
         }

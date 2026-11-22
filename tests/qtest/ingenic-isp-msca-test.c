@@ -34,6 +34,7 @@
 #define LEVEL           2       /* a level under 128 */
 #define POLY_T21        1       /* the T21's fixed filter */
 #define POLY_T40        2       /* the T40's */
+#define POLY_T31        3       /* the T31's */
 
 typedef struct Part {
     const char *machine, *model, *extra;
@@ -74,6 +75,14 @@ static const Part t21 = {
     .ch_en = 0x2304, .ch = 0x2400, .size = 0x00, .y = 0x6c, .uv = 0x84,
     .y_stride = 0x80, .uv_stride = 0x98, .done = 0x7c, .done_y = 0x74,
     .vic_start = 0x10000, .first_ms = 135,
+};
+
+static const Part t31 = {
+    .machine = "ingenic-t31", .model = "gc2053", .fixed = POLY_T31,
+    .fsize = 0x04,
+    .ch_en = 0x9804, .ch = 0x9900, .size = 0x00, .y = 0x6c, .uv = 0x84,
+    .y_stride = 0x80, .uv_stride = 0x98, .done = 0x7c, .done_y = 0x74,
+    .vic_start = 0xe0000, .first_ms = 135,
 };
 
 static const Part t32 = {
@@ -273,7 +282,12 @@ static void scale(const Part *p, unsigned ch, const uint8_t *src, unsigned sw,
  * in * 512 / out, and chroma pairs that take the sample at the integer part;
  * a T40's step is (in * 512 - 1) / out, its chroma pairs filtered as luma,
  * and a box of four on the vertical axis when the horizontal one is scaled
- * too.
+ * too. A T31 takes a box of four over a step of 1024 (2:1); its chroma pairs
+ * there are the sample at the integer part below phase 1/2 and the mean of
+ * it and the next from there; below 2:1 they are an approximation fitted to
+ * a T31X, the sample up to phase 1/2 and the two mixed by twice the phase
+ * less one from there. The T31 cases compare the model with that rule as
+ * written here, not with the part's output: they pin the rule.
  */
 static const int16_t rows9[257][4] = {
     { 0, 512, 0, 0 }, { 0, 512, 0, 0 }, { 0, 512, 0, 0 },
@@ -364,6 +378,14 @@ static const int16_t rows9[257][4] = {
     { -32, 289, 286, -32 }, { -32, 288, 288, -32 },
 };
 
+static void set4(int *w, int a, int b, int c, int d)
+{
+    w[0] = a;
+    w[1] = b;
+    w[2] = c;
+    w[3] = d;
+}
+
 static void poly_cols(unsigned kind, unsigned n_in, unsigned n_out,
                       unsigned nc, bool box, int *k0, int w[][4])
 {
@@ -382,6 +404,17 @@ static void poly_cols(unsigned kind, unsigned n_in, unsigned n_out,
             } else if (kind == POLY_T21 && nc == 2) {
                 w[x][t] = t == 1 ? 4096 : 0;
             }
+        }
+        if (kind == POLY_T31 && step == 512) {
+            set4(w[x], 0, 4096, 0, 0);
+        } else if (kind == POLY_T31 && step > 1024 && nc == 2) {
+            set4(w[x], 0, ph < 256 ? 4096 : 2048, ph < 256 ? 0 : 2048, 0);
+        } else if (kind == POLY_T31 && step > 1024) {
+            set4(w[x], 1024, 1024, 1024, 1024);
+        } else if (kind == POLY_T31 && nc == 2) {
+            int f = MIN(MAX(2 * (int)ph - 512, 0), 512) * 8;
+
+            set4(w[x], 0, 4096 - f, f, 0);
         }
     }
 }
@@ -533,6 +566,8 @@ static const Case cases[] = {
     { &t40, 1, 96, 48 }, { &t40, 1, 128, 32 }, { &t40, 1, 64, 64 },
     { &t40, 1, 40, 22 }, { &t21, 1, 96, 48 }, { &t21, 1, 128, 32 },
     { &t21, 1, 40, 22 }, { &t21, 1, 32, 16 },
+    { &t31, 1, 96, 48 }, { &t31, 1, 106, 54 }, { &t31, 1, 128, 32 },
+    { &t31, 1, 64, 32 }, { &t31, 1, 40, 22 },
 };
 
 static void test_case(const void *data)
