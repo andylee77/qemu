@@ -330,6 +330,13 @@ static void avpu_decode_el150(IngenicAvpuJob *j)
     pic->el200_p = pic->hevc;
     pic->p_level_round = pic->hevc ? 87 : 0;
     pic->p_chroma_skip = pic->hevc;
+    /*
+     * MEASURED on a T31X (gc2053, raptor's 1920x1080 and 640x360 H.265
+     * streams, 300 pictures each, HM's merge lists): as on the T41, no
+     * merged or skipped block of 2.3 million takes merge_idx 3 or 4, while
+     * 2915 AMVP blocks carry exactly the vector in slot 3 or 4
+     */
+    pic->merge_tried = pic->hevc ? 3 : 0;
     pic->intra4_coarse = pic->hevc;
     j->src_y = w[0x20];
     j->src_uv = w[0x21];
@@ -381,6 +388,13 @@ static void avpu_decode_el200(IngenicAvpuJob *j)
     pic->intra_split = pic->hevc;
     pic->intra_rd = pic->hevc;
     pic->el200_p = pic->hevc;
+    /*
+     * MEASURED on a T41NQ (os04d10, raptor's 2560x1440 and 640x360 H.265
+     * streams, 250 pictures each, HM's merge lists): no merged or skipped
+     * block of 2.1 million takes merge_idx 3 or 4, while 6072 AMVP blocks
+     * carry exactly the vector in slot 3 or 4
+     */
+    pic->merge_tried = pic->hevc ? 3 : 0;
     pic->el200_i = pic->hevc;
     j->src_y = w[40];
     j->src_uv = w[42];

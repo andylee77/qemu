@@ -79,13 +79,15 @@ typedef struct {
     unsigned noise_len;         /* the noise picture's slice, and its error */
     uint64_t noise_se;
     unsigned p_static, p_moved; /* the P slices of test_p */
+    unsigned merge_len;         /* test_merge3's P slice, and its CRC */
+    uint32_t merge_crc;
 } Rig;
 
 static const Rig rigs[] = {
     { "el150", "ingenic-t31", 0x13200000, 0x83e0, 0x83e4, 0x8018, 0, false,
-      ENTRY, 925, 54057, 2, 89 },
+      ENTRY, 925, 54057, 2, 89, 98, 0xcf4a65c8 },
     { "el200", "ingenic-t41", 0x13100000, 0x1000, 0x1018, 0x18, 0x1008, true,
-      ENTRY200, 691, 68044, 12, 79 },
+      ENTRY200, 691, 68044, 12, 79, 79, 0x8524f822 },
 };
 
 /* The T40's EL150, which writes the T31's I pictures byte for byte */
@@ -495,9 +497,76 @@ static void test_p(const void *data)
     qtest_quit(qts);
 }
 
+/*
+ * Only the first three merge candidates are tried (MEASURED: a T41NQ's and a
+ * T31X's own H.265 streams decoded by HM, 4.4 million merged or skipped
+ * blocks, none with merge_idx 3 or 4, while 8987 AMVP blocks carry exactly
+ * the vector in slot 3 or 4): a texture whose 16x16 blocks each move by a
+ * vector of their own, so that the merge lists fill with different
+ * vectors, coded as a P picture with the search on. Pinned: the bytes of
+ * the P slice and the CRC of its data (EL150 98, EL200 79), which a coder
+ * trying all five candidates does not write (97 and 78).
+ */
+static void merge_picture(uint8_t *y, uint8_t *c, bool moved)
+{
+    static const int8_t shift[6][2] = {
+        { 0, 0 }, { 2, 0 }, { -2, 0 }, { 0, 2 }, { 0, -2 }, { 4, 2 },
+    };
+
+    for (int r = 0; r < H; r++) {
+        for (int x = 0; x < W; x++) {
+            int b = (r >> 4) * (W >> 4) + (x >> 4);
+            int k = moved ? (b * 7 + (b >> 2) * 3) % 6 : 0;
+            int xs = x + shift[k][0], ys = r + shift[k][1];
+
+            y[r * W + x] = 64 + pmod(xs * 13 + ys * 7, 96) +
+                           ((xs * 7919 + ys * 104729) >> 4 & 31);
+        }
+    }
+    memset(c, 128, W * H / 2);
+}
+
+static uint32_t merge_bytes(QTestState *qts, const Rig *r, uint32_t *crc)
+{
+    uint8_t y[W * H], uv[W * H / 2], ep2[0x100] = { [19] = 51 }, d[SLOT];
+    const Entry e = { 0, 0, 2, 1 };
+    uint32_t len;
+
+    qtest_memwrite(qts, EP2, ep2, sizeof(ep2));
+    merge_picture(y, uv, false);
+    qtest_memwrite(qts, SRC_Y, y, sizeof(y));
+    qtest_memwrite(qts, SRC_C, uv, sizeof(uv));
+    run_list(qts, r, &e, 1, 0x211e0000, 0x00083f1f, false);
+    merge_picture(y, uv, true);
+    qtest_memwrite(qts, SRC_Y, y, sizeof(y));
+    qtest_memwrite(qts, SRC_C, uv, sizeof(uv));
+    run_list(qts, r, &e, 1, 0x111e0000, 0x00083f1f, false);
+    len = slice_data(qts, r, 0, d);
+    *crc = crc32_le(d, len);
+    return len;
+}
+
+static void test_merge3(const void *data)
+{
+    const Rig *r = data;
+    QTestState *qts = qtest_initf("-machine %s "
+                                  "-global ingenic-avpu.h265-motion=search",
+                                  r->machine);
+    uint32_t crc, len = merge_bytes(qts, r, &crc);
+
+    g_test_message("%s: %u bytes, CRC 0x%08x", r->name, len, crc);
+    g_assert_cmpuint(len, ==, r->merge_len);
+    g_assert_cmphex(crc, ==, r->merge_crc);
+    qtest_quit(qts);
+}
+
 int main(int argc, char **argv)
 {
     g_test_init(&argc, &argv, NULL);
+    qtest_add_data_func("/ingenic-avpu/hevc-slices/el150/merge3", &rigs[0],
+                        test_merge3);
+    qtest_add_data_func("/ingenic-avpu/hevc-slices/el200/merge3", &rigs[1],
+                        test_merge3);
     for (int j = 0; j < ARRAY_SIZE(rigs); j++) {
         for (int i = 0; i < ARRAY_SIZE(cases); i++) {
             CaseRig *cr = g_new(CaseRig, 1);

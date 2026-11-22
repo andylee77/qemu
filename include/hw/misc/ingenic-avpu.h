@@ -150,6 +150,11 @@ typedef struct IngenicAvpuPic {
      */
     bool p_chroma_skip;
     /*
+     * el200_p: only the first this many merge candidates are tried; a
+     * vector the list has only further down is coded as AMVP. 0: all
+     */
+    int merge_tried;
+    /*
      * H.265 I pictures with transform_skip_enabled (the T31's EL150): a 4x4
      * luma block of four skips the transform where that leaves less error in
      * its levels

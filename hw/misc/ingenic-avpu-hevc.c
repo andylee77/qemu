@@ -5645,7 +5645,8 @@ done:
  * pictures): a vector a merge candidate has is skipped where its levels are
  * all zero and merged with them where not; the AMVP is for a vector no
  * candidate has. The vector is the cheapest of the candidates' and the
- * search's.
+ * search's. Only the first merge_tried candidates are tried (three on the
+ * T41 and the T31): a vector the list has only further down is the AMVP's.
  */
 static int hevc_pcu_el200(HevcEnc *e, int x0, int y0, int log2)
 {
@@ -5668,6 +5669,9 @@ static int hevc_pcu_el200(HevcEnc *e, int x0, int y0, int log2)
         memset(e->hedge + (y0 >> 3) * e->w4 + (x0 >> 2), 1, n >> 2);
     }
     nm = hevc_merge_list(e, x0, y0, n, ml);
+    if (e->pic->merge_tried) {
+        nm = MIN(nm, e->pic->merge_tried);
+    }
     hevc_save(e, &sv);
     hevc_amvp(e, x0, y0, n, amvp);
     /* the first candidate with nothing to code is the skip, found or not */
